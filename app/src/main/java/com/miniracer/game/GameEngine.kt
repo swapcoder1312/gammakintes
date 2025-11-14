@@ -37,7 +37,7 @@ class GameEngine(private val context: Context? = null) {
      * Player input types for handling user interaction.
      */
     enum class Input {
-        LEFT, RIGHT
+        LEFT, RIGHT, ACCELERATE, RELEASE_LEFT, RELEASE_RIGHT, RELEASE_ACCELERATE
     }
     
     // Game entities
@@ -53,6 +53,12 @@ class GameEngine(private val context: Context? = null) {
     
     private val _gameState = MutableStateFlow(GameStateData())
     val gameState: StateFlow<GameStateData> = _gameState.asStateFlow()
+    
+    // Input state (for continuous input)
+    private var isSteeringLeft = false
+    private var isSteeringRight = false
+    private var isAccelerating = false
+    private var tiltSteeringValue = 0f // -1.0 (left) to 1.0 (right)
     
     // Game loop timing - Fixed timestep at 60 FPS
     private val targetFPS = 60
@@ -72,7 +78,13 @@ class GameEngine(private val context: Context? = null) {
     
     // Game data
     private var gameSpeed = 1f
+    private var baseSpeed = 1f
     private var score = 0
+    private var gameTime = 0L // Milliseconds
+    private var startTime = 0L
+    private var pausedTime = 0L
+    private var pauseStartTime = 0L
+    private var position = 1 // Player position (1 = first)
     private var renderCallback: ((DrawScope) -> Unit)? = null
     
     init {
@@ -93,7 +105,16 @@ class GameEngine(private val context: Context? = null) {
         
         // Reset game data
         gameSpeed = 1f
+        baseSpeed = 1f
         score = 0
+        gameTime = 0L
+        startTime = 0L
+        pausedTime = 0L
+        position = 1
+        isSteeringLeft = false
+        isSteeringRight = false
+        isAccelerating = false
+        tiltSteeringValue = 0f
         playerCar.reset()
     }
     
@@ -109,6 +130,8 @@ class GameEngine(private val context: Context? = null) {
         isRunning = true
         lastFrameTimeNs = System.nanoTime()
         accumulatorNs = 0L
+        startTime = System.currentTimeMillis()
+        pausedTime = 0L
         
         // Start the game loop using Choreographer for frame synchronization
         choreographer = Choreographer.getInstance()
@@ -135,6 +158,7 @@ class GameEngine(private val context: Context? = null) {
         
         isRunning = false
         stopGameLoop()
+        pauseStartTime = System.currentTimeMillis()
         _engineState.value = EngineState.PAUSED
     }
     
@@ -145,6 +169,10 @@ class GameEngine(private val context: Context? = null) {
      */
     fun resume() {
         if (_engineState.value != EngineState.PAUSED) return
+        
+        // Add paused time to total paused time
+        pausedTime += System.currentTimeMillis() - pauseStartTime
+        pauseStartTime = 0L
         
         _engineState.value = EngineState.RUNNING
         isRunning = true
@@ -242,13 +270,21 @@ class GameEngine(private val context: Context? = null) {
     private fun updateGame(deltaTime: Float) {
         if (_engineState.value != EngineState.RUNNING) return
         
-        // 1. UPDATE TRACK - Scroll the road background
+        // 1. PROCESS ACCELERATION - Adjust game speed based on accelerator input
+        if (isAccelerating) {
+            baseSpeed = (baseSpeed + 0.02f).coerceAtMost(3.0f) // Max speed multiplier
+        } else {
+            baseSpeed = (baseSpeed - 0.01f).coerceAtLeast(1.0f) // Min speed
+        }
+        gameSpeed = baseSpeed + (score / 1000f) * 0.1f // Speed increases with score
+        
+        // 2. UPDATE TRACK - Scroll the road background
         track.update(gameSpeed)
         
-        // 2. UPDATE PLAYER - Process player car movement and lane changes
+        // 3. UPDATE PLAYER - Process player car movement and lane changes
         playerCar.update()
         
-        // 3. UPDATE OPPONENTS - Move AI-controlled cars down the track
+        // 4. UPDATE OPPONENTS - Move AI-controlled cars down the track
         opponents.forEach { opponent ->
             opponent.update(gameSpeed)
             
@@ -258,7 +294,7 @@ class GameEngine(private val context: Context? = null) {
             }
         }
         
-        // 4. COLLISION DETECTION - Check for collisions between player and opponents
+        // 5. COLLISION DETECTION - Check for collisions between player and opponents
         if (collisionDetector.checkCollision(playerCar, opponents)) {
             // Collision detected - transition to game over state
             _engineState.value = EngineState.GAME_OVER
@@ -267,14 +303,24 @@ class GameEngine(private val context: Context? = null) {
             stopGameLoop()
         }
         
-        // 5. UPDATE SCORE AND DIFFICULTY - Increase score and game speed over time
+        // 6. UPDATE SCORE - Increase score over time based on speed
         score += (gameSpeed * 0.1f).toInt()
-        gameSpeed += 0.001f // Gradually increase difficulty
         
-        // 6. UPDATE GAME STATE - Broadcast current game state to UI
+        // 7. UPDATE GAME TIME - Track elapsed game time (excluding paused time)
+        if (startTime > 0) {
+            gameTime = System.currentTimeMillis() - startTime - pausedTime
+        }
+        
+        // 8. CALCULATE POSITION - Determine player position relative to opponents
+        // For now, assume player is always in first position (can be enhanced later)
+        position = 1
+        
+        // 9. UPDATE GAME STATE - Broadcast current game state to UI
         _gameState.value = _gameState.value.copy(
             score = score,
             speed = gameSpeed,
+            gameTime = gameTime,
+            position = position,
             isGameOver = _engineState.value == EngineState.GAME_OVER
         )
     }
@@ -314,18 +360,62 @@ class GameEngine(private val context: Context? = null) {
     }
     
     /**
-     * Handles player input for lane changes.
+     * Handles player input for lane changes and acceleration.
      * Input is processed immediately when received, affecting the next update cycle.
      * 
-     * @param input The input direction (LEFT or RIGHT)
+     * @param input The input action (LEFT, RIGHT, ACCELERATE, or release actions)
      */
     fun handleInput(input: Input) {
         // Only process input when game is running
         if (_engineState.value != EngineState.RUNNING) return
         
         when (input) {
-            Input.LEFT -> playerCar.moveLeft()
-            Input.RIGHT -> playerCar.moveRight()
+            Input.LEFT -> {
+                isSteeringLeft = true
+                isSteeringRight = false
+                playerCar.moveLeft()
+            }
+            Input.RIGHT -> {
+                isSteeringRight = true
+                isSteeringLeft = false
+                playerCar.moveRight()
+            }
+            Input.RELEASE_LEFT -> {
+                isSteeringLeft = false
+            }
+            Input.RELEASE_RIGHT -> {
+                isSteeringRight = false
+            }
+            Input.ACCELERATE -> {
+                isAccelerating = true
+            }
+            Input.RELEASE_ACCELERATE -> {
+                isAccelerating = false
+            }
+        }
+    }
+    
+    /**
+     * Sets tilt steering value from accelerometer.
+     * @param tiltValue Tilt value from -1.0 (left) to 1.0 (right)
+     */
+    fun setTiltSteering(tiltValue: Float) {
+        tiltSteeringValue = tiltValue.coerceIn(-1f, 1f)
+        
+        // Apply tilt steering continuously
+        // Map tilt value to lane position: -1.0 = lane 0, 0.0 = lane 1, 1.0 = lane 2
+        if (kotlin.math.abs(tiltValue) > 0.1f) {
+            val targetLane = ((tiltValue + 1f) * 1f).toInt().coerceIn(0, 2)
+            val currentLane = playerCar.getLane()
+            
+            // Only change lane if tilt is significant
+            if (targetLane != currentLane) {
+                if (tiltValue < -0.3f && currentLane > 0) {
+                    playerCar.moveLeft()
+                } else if (tiltValue > 0.3f && currentLane < 2) {
+                    playerCar.moveRight()
+                }
+            }
         }
     }
     
@@ -357,6 +447,8 @@ class GameEngine(private val context: Context? = null) {
 data class GameStateData(
     val score: Int = 0,
     val speed: Float = 1f,
+    val gameTime: Long = 0L, // Milliseconds
+    val position: Int = 1,
     val isGameOver: Boolean = false
 )
 

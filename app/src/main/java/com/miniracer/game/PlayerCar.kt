@@ -42,6 +42,17 @@ class PlayerCar {
         }
     }
     
+    /**
+     * Sets the target lane for smooth steering (used for tilt control).
+     * @param targetLane Desired lane (0-2), clamped to valid range
+     */
+    fun setLaneTarget(targetLane: Int) {
+        val clampedLane = targetLane.coerceIn(0, 2)
+        if (kotlin.math.abs(clampedLane - lane) <= 1) {
+            lane = clampedLane
+        }
+    }
+    
     fun update() {
         // Smoothly move to target lane
         val targetX = lanes[lane]
