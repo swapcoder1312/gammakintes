@@ -2,6 +2,7 @@ package com.miniracer.game
 
 import android.content.Context
 import android.view.Choreographer
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -93,14 +94,89 @@ class GameEngine(private val context: Context? = null) {
         _engineState.value = EngineState.LOADING
     }
     
+    // AI difficulty setting (can be changed)
+    private var aiDifficulty: AIDifficulty = AIDifficulty.MEDIUM
+    private var aiSeed: Long = System.currentTimeMillis() // Seed for deterministic AI
+    
+    /**
+     * Sets the AI difficulty level.
+     */
+    fun setAIDifficulty(difficulty: AIDifficulty) {
+        aiDifficulty = difficulty
+    }
+    
+    /**
+     * Sets the AI seed for deterministic behavior.
+     */
+    fun setAISeed(seed: Long) {
+        aiSeed = seed
+    }
+    
+    /**
+     * Generates waypoints from track data or creates default waypoints.
+     */
+    private fun generateWaypoints(): List<Waypoint> {
+        val trackData = track.getTrackData()
+        val waypoints = mutableListOf<Waypoint>()
+        
+        if (trackData != null && trackData.centerLine.isNotEmpty()) {
+            // Generate waypoints from track center line
+            val centerLine = trackData.centerLine
+            val curves = trackData.curves
+            
+            for (i in centerLine.indices step 5) { // Every 5th point
+                val point = centerLine[i]
+                
+                // Check if this point is in a curve
+                val curve = curves.find { 
+                    point.y >= it.startY && point.y <= it.endY 
+                }
+                
+                val isStraight = curve == null
+                val curveRadius = curve?.radius ?: Float.MAX_VALUE
+                
+                waypoints.add(Waypoint(
+                    position = point,
+                    curveRadius = curveRadius,
+                    isStraight = isStraight,
+                    speedLimit = if (isStraight) Float.MAX_VALUE else curveRadius * 2f
+                ))
+            }
+        } else {
+            // Generate default waypoints (straight track)
+            val screenWidth = 1080f
+            val centerX = screenWidth / 2f
+            for (y in 0..3000 step 100) {
+                waypoints.add(Waypoint(
+                    position = Offset(centerX, y.toFloat()),
+                    curveRadius = Float.MAX_VALUE,
+                    isStraight = true
+                ))
+            }
+        }
+        
+        return waypoints
+    }
+    
     /**
      * Initializes game entities (opponents, track, player).
      */
     private fun initializeGame() {
-        // Initialize opponents
+        // Generate waypoints
+        val waypoints = generateWaypoints()
+        
+        // Initialize opponents with waypoint-based AI
         opponents.clear()
+        val random = kotlin.random.Random(aiSeed)
         repeat(3) { i ->
-            opponents.add(OpponentCar(lane = i, yOffset = -200f * (i + 1)))
+            val opponentSeed = aiSeed + i * 1000L // Unique seed for each opponent
+            opponents.add(OpponentCar(
+                lane = i,
+                yOffset = -200f * (i + 1),
+                difficulty = aiDifficulty,
+                aiSeed = opponentSeed,
+                waypoints = waypoints
+            ))
         }
         
         // Reset game data
@@ -290,9 +366,11 @@ class GameEngine(private val context: Context? = null) {
         // 3. UPDATE PLAYER - Process player car physics
         playerCar.update(deltaTime)
         
-        // 4. UPDATE OPPONENTS - Move AI-controlled cars with physics
+        // 4. UPDATE OPPONENTS - Move AI-controlled cars with waypoint-based AI
         opponents.forEach { opponent ->
-            opponent.update(deltaTime, gameSpeed)
+            // Pass other opponents and player for overtaking logic
+            val otherOpponents = opponents.filter { it !== opponent }
+            opponent.update(deltaTime, gameSpeed, otherOpponents, playerCar)
             
             // Respawn opponent if off screen (recycle for performance)
             if (opponent.getY() > 2000f) {
