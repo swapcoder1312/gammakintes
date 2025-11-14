@@ -270,23 +270,29 @@ class GameEngine(private val context: Context? = null) {
     private fun updateGame(deltaTime: Float) {
         if (_engineState.value != EngineState.RUNNING) return
         
-        // 1. PROCESS ACCELERATION - Adjust game speed based on accelerator input
-        if (isAccelerating) {
-            baseSpeed = (baseSpeed + 0.02f).coerceAtMost(3.0f) // Max speed multiplier
-        } else {
-            baseSpeed = (baseSpeed - 0.01f).coerceAtLeast(1.0f) // Min speed
+        // 1. UPDATE PLAYER INPUT - Apply physics-based input to player car
+        playerCar.setAccelerating(isAccelerating)
+        
+        // Apply steering based on input state
+        val steeringValue = when {
+            isSteeringLeft -> -1f
+            isSteeringRight -> 1f
+            kotlin.math.abs(tiltSteeringValue) > 0.1f -> tiltSteeringValue
+            else -> 0f
         }
-        gameSpeed = baseSpeed + (score / 1000f) * 0.1f // Speed increases with score
+        playerCar.setSteering(steeringValue)
         
         // 2. UPDATE TRACK - Scroll the road background
-        track.update(gameSpeed)
+        // Use player's velocity for track scrolling instead of fixed gameSpeed
+        val trackScrollSpeed = playerCar.getVelocity() * 0.01f
+        track.update(trackScrollSpeed)
         
-        // 3. UPDATE PLAYER - Process player car movement and lane changes
-        playerCar.update()
+        // 3. UPDATE PLAYER - Process player car physics
+        playerCar.update(deltaTime)
         
-        // 4. UPDATE OPPONENTS - Move AI-controlled cars down the track
+        // 4. UPDATE OPPONENTS - Move AI-controlled cars with physics
         opponents.forEach { opponent ->
-            opponent.update(gameSpeed)
+            opponent.update(deltaTime, gameSpeed)
             
             // Respawn opponent if off screen (recycle for performance)
             if (opponent.getY() > 2000f) {
@@ -294,17 +300,36 @@ class GameEngine(private val context: Context? = null) {
             }
         }
         
-        // 5. COLLISION DETECTION - Check for collisions between player and opponents
-        if (collisionDetector.checkCollision(playerCar, opponents)) {
-            // Collision detected - transition to game over state
-            _engineState.value = EngineState.GAME_OVER
-            saveManager.saveHighScore(score)
-            isRunning = false
-            stopGameLoop()
+        // 5. COLLISION DETECTION - Check for collisions and apply response
+        val playerBounds = playerCar.getBounds()
+        val collidingOpponent = opponents.find { opponent ->
+            val opponentBounds = opponent.getBounds()
+            collisionDetector.checkCollision(playerBounds, opponentBounds)
         }
         
-        // 6. UPDATE SCORE - Increase score over time based on speed
-        score += (gameSpeed * 0.1f).toInt()
+        if (collidingOpponent != null) {
+            // Calculate impact direction
+            val playerX = playerCar.getX()
+            val playerY = playerCar.getY()
+            val opponentX = collidingOpponent.getX()
+            val opponentY = collidingOpponent.getY()
+            
+            val impactDirection = androidx.compose.ui.geometry.Offset(
+                opponentX - playerX,
+                opponentY - playerY
+            )
+            
+            // Apply collision response to both cars
+            playerCar.applyCollision(impactDirection)
+            collidingOpponent.applyCollision(-impactDirection)
+            
+            // Small score penalty for collision
+            score = (score * 0.95f).toInt().coerceAtLeast(0)
+        }
+        
+        // 6. UPDATE SCORE - Increase score over time based on player speed
+        val playerSpeed = playerCar.getVelocity()
+        score += (playerSpeed * 0.01f).toInt()
         
         // 7. UPDATE GAME TIME - Track elapsed game time (excluding paused time)
         if (startTime > 0) {
@@ -312,13 +337,15 @@ class GameEngine(private val context: Context? = null) {
         }
         
         // 8. CALCULATE POSITION - Determine player position relative to opponents
-        // For now, assume player is always in first position (can be enhanced later)
-        position = 1
+        // Count how many opponents are ahead (lower Y = ahead in top-down view)
+        val playerY = playerCar.getY()
+        val aheadCount = opponents.count { it.getY() < playerY }
+        position = aheadCount + 1
         
         // 9. UPDATE GAME STATE - Broadcast current game state to UI
         _gameState.value = _gameState.value.copy(
             score = score,
-            speed = gameSpeed,
+            speed = playerSpeed / 100f, // Convert to display-friendly speed
             gameTime = gameTime,
             position = position,
             isGameOver = _engineState.value == EngineState.GAME_OVER
@@ -401,22 +428,7 @@ class GameEngine(private val context: Context? = null) {
      */
     fun setTiltSteering(tiltValue: Float) {
         tiltSteeringValue = tiltValue.coerceIn(-1f, 1f)
-        
-        // Apply tilt steering continuously
-        // Map tilt value to lane position: -1.0 = lane 0, 0.0 = lane 1, 1.0 = lane 2
-        if (kotlin.math.abs(tiltValue) > 0.1f) {
-            val targetLane = ((tiltValue + 1f) * 1f).toInt().coerceIn(0, 2)
-            val currentLane = playerCar.getLane()
-            
-            // Only change lane if tilt is significant
-            if (targetLane != currentLane) {
-                if (tiltValue < -0.3f && currentLane > 0) {
-                    playerCar.moveLeft()
-                } else if (tiltValue > 0.3f && currentLane < 2) {
-                    playerCar.moveRight()
-                }
-            }
-        }
+        // Steering is now applied in updateGame() via setSteering()
     }
     
     /**
