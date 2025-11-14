@@ -42,7 +42,7 @@ class GameEngine(private val context: Context? = null) {
     
     // Game entities
     private val playerCar = PlayerCar()
-    private val track = Track()
+    private val track = Track(context)
     private val opponents = mutableListOf<OpponentCar>()
     private val collisionDetector = CollisionDetector()
     private val saveManager = SaveManager(context)
